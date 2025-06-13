@@ -12,6 +12,14 @@ Publishing to a different topic (in this case `my_cmd_vel`).
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=my_cmd_vel
 ```
 
+Publishing repeatedly at a desired rate (e.g., 20 Hz).
+
+```sh
+rros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p repeat_rate:=20.0
+```
+
+
+
 ## Usage
 
 ```
