@@ -46,3 +46,5 @@ CTRL-C to quit
   - If false (the default), publish a `geometry_msgs/msg/Twist` message.  If true, publish a `geometry_msgs/msg/TwistStamped` message.
 - `frame_id (string, default: '')`
   - When `stamped` is true, the frame_id to use when publishing the `geometry_msgs/msg/TwistStamped` message.
+- `repeat_rate (float, default: '10.0')`
+  - The rate (in Hz) at which the Twist or TwistStamped message is repeatedly published.  

@@ -1,41 +1,10 @@
-# Copyright 2011 Brown University Robotics.
-# Copyright 2017 Open Source Robotics Foundation, Inc.
-# All rights reserved.
-#
-# Software License Agreement (BSD License 2.0)
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above
-#    copyright notice, this list of conditions and the following
-#    disclaimer in the documentation and/or other materials provided
-#    with the distribution.
-#  * Neither the name of the Willow Garage nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-# COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
-# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-# POSSIBILITY OF SUCH DAMAGE.
-
 import sys
 import threading
+import time
 
 import geometry_msgs.msg
 import rclpy
+from rclpy.node import Node
 
 if sys.platform == 'win32':
     import msvcrt
@@ -44,7 +13,8 @@ else:
     import tty
 
 
-msg = """
+class TeleopTwistKeyboard(Node):
+    HELP_MSG = """
 This node takes keypresses from the keyboard and publishes them
 as Twist/TwistStamped messages. It works best with a US keyboard layout.
 ---------------------------
@@ -71,160 +41,211 @@ e/c : increase/decrease only angular speed by 10%
 CTRL-C to quit
 """
 
-moveBindings = {
-    'i': (1, 0, 0, 0),
-    'o': (1, 0, 0, -1),
-    'j': (0, 0, 0, 1),
-    'l': (0, 0, 0, -1),
-    'u': (1, 0, 0, 1),
-    ',': (-1, 0, 0, 0),
-    '.': (-1, 0, 0, 1),
-    'm': (-1, 0, 0, -1),
-    'O': (1, -1, 0, 0),
-    'I': (1, 0, 0, 0),
-    'J': (0, 1, 0, 0),
-    'L': (0, -1, 0, 0),
-    'U': (1, 1, 0, 0),
-    '<': (-1, 0, 0, 0),
-    '>': (-1, -1, 0, 0),
-    'M': (-1, 1, 0, 0),
-    't': (0, 0, 1, 0),
-    'b': (0, 0, -1, 0),
-}
+    def __init__(self):
+        super().__init__('teleop_twist_keyboard')
+        
+        # Parameters
+        self.declare_parameter('stamped', False)
+        self.declare_parameter('frame_id', '')
+        self.declare_parameter('repeat_rate', 10.0)  # Hz
+        
+        self.stamped = self.get_parameter('stamped').value
+        self.frame_id = self.get_parameter('frame_id').value
+        self.repeat_rate = self.get_parameter('repeat_rate').value
 
-speedBindings = {
-    'q': (1.1, 1.1),
-    'z': (.9, .9),
-    'w': (1.1, 1),
-    'x': (.9, 1),
-    'e': (1, 1.1),
-    'c': (1, .9),
-}
+        if not self.stamped and self.frame_id:
+            raise Exception("'frame_id' can only be set when 'stamped' is True")
 
+        # Define message type based on parameters
+        if self.stamped:
+            self.twist_msg_type = geometry_msgs.msg.TwistStamped
+        else:
+            self.twist_msg_type = geometry_msgs.msg.Twist
 
-def getKey(settings):
-    if sys.platform == 'win32':
-        # getwch() returns a string on Windows
-        key = msvcrt.getwch()
-    else:
-        tty.setraw(sys.stdin.fileno())
-        # sys.stdin.read() returns a string on Linux
-        key = sys.stdin.read(1)
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-    return key
+        # Publisher
+        self.publisher = self.create_publisher(self.twist_msg_type, 'cmd_vel', 10)
+    
+        
+        # Movement bindings
+        self.move_bindings = {
+            'i': (1, 0, 0, 0),
+            'o': (1, 0, 0, -1),
+            'j': (0, 0, 0, 1),
+            'l': (0, 0, 0, -1),
+            'u': (1, 0, 0, 1),
+            ',': (-1, 0, 0, 0),
+            '.': (-1, 0, 0, 1),
+            'm': (-1, 0, 0, -1),
+            'O': (1, -1, 0, 0),
+            'I': (1, 0, 0, 0),
+            'J': (0, 1, 0, 0),
+            'L': (0, -1, 0, 0),
+            'U': (1, 1, 0, 0),
+            '<': (-1, 0, 0, 0),
+            '>': (-1, -1, 0, 0),
+            'M': (-1, 1, 0, 0),
+            't': (0, 0, 1, 0),
+            'b': (0, 0, -1, 0),
+        }
 
+        self.speed_bindings = {
+            'q': (1.1, 1.1),
+            'z': (.9, .9),
+            'w': (1.1, 1),
+            'x': (.9, 1),
+            'e': (1, 1.1),
+            'c': (1, .9),
+        }
+        
+        # Movement variables
+        self.speed = 0.5
+        self.turn = 1.0
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        self.th = 0.0
+        
+        # Terminal settings
+        self.settings = self.save_terminal_settings()
+        
+        # Create message object once
+        self.twist_msg = self.twist_msg_type()
+        
+        # Status variable for help text
+        self.status = 0
+        
+        # Thread for keyboard input
+        self.key_thread = threading.Thread(target=self.get_key_loop)
+        self.running = True
+        
+        # Timer for publishing at constant rate
+        self.timer = self.create_timer(1.0/self.repeat_rate, self.publish_twist)
 
-def saveTerminalSettings():
-    if sys.platform == 'win32':
-        return None
-    return termios.tcgetattr(sys.stdin)
+    def save_terminal_settings(self):
+        if sys.platform == 'win32':
+            return None
+        return termios.tcgetattr(sys.stdin)
 
+    def restore_terminal_settings(self):
+        if sys.platform == 'win32':
+            return
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
 
-def restoreTerminalSettings(old_settings):
-    if sys.platform == 'win32':
-        return
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+    def get_key(self):
+        if sys.platform == 'win32':
+            # getwch() returns a string on Windows
+            key = msvcrt.getwch()
+        else:
+            tty.setraw(sys.stdin.fileno())
+            # sys.stdin.read() returns a string on Linux
+            key = sys.stdin.read(1)
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+        return key
 
+    def get_key_loop(self):
+        try:
+            print(self.HELP_MSG)
+            print(self.vels())
+            
+            while self.running:
+                key = self.get_key()
+                
+                if key in self.move_bindings:
+                    self.x = self.move_bindings[key][0]
+                    self.y = self.move_bindings[key][1]
+                    self.z = self.move_bindings[key][2]
+                    self.th = self.move_bindings[key][3]
+                
+                elif key in self.speed_bindings:
+                    self.speed = self.speed * self.speed_bindings[key][0]
+                    self.turn = self.turn * self.speed_bindings[key][1]
+                    
+                    print(self.vels())
+                    if self.status == 14:
+                        print(self.HELP_MSG)
+                    self.status = (self.status + 1) % 15
+                
+                else:
+                    self.x = 0.0
+                    self.y = 0.0
+                    self.z = 0.0
+                    self.th = 0.0
+                    
+                    if key == '\x03':  # CTRL-C
+                        self.running = False
+                        break
+                        
+        except Exception as e:
+            print(f"Exception in keyboard thread: {e}")
+            self.running = False
 
-def vels(speed, turn):
-    return 'currently:\tspeed %s\tturn %s ' % (speed, turn)
+    def vels(self):
+        return f"currently:\tspeed {self.speed:.2f}\tturn {self.turn:.2f}"
 
-
-def main():
-    settings = saveTerminalSettings()
-
-    rclpy.init()
-
-    node = rclpy.create_node('teleop_twist_keyboard')
-
-    # parameters
-    stamped = node.declare_parameter('stamped', False).value
-    frame_id = node.declare_parameter('frame_id', '').value
-    if not stamped and frame_id:
-        raise Exception("'frame_id' can only be set when 'stamped' is True")
-
-    if stamped:
-        TwistMsg = geometry_msgs.msg.TwistStamped
-    else:
-        TwistMsg = geometry_msgs.msg.Twist
-
-    pub = node.create_publisher(TwistMsg, 'cmd_vel', 10)
-
-    spinner = threading.Thread(target=rclpy.spin, args=(node,))
-    spinner.start()
-
-    speed = 0.5
-    turn = 1.0
-    x = 0.0
-    y = 0.0
-    z = 0.0
-    th = 0.0
-    status = 0.0
-
-    twist_msg = TwistMsg()
-
-    if stamped:
-        twist = twist_msg.twist
-        twist_msg.header.stamp = node.get_clock().now().to_msg()
-        twist_msg.header.frame_id = frame_id
-    else:
-        twist = twist_msg
-
-    try:
-        print(msg)
-        print(vels(speed, turn))
-        while True:
-            key = getKey(settings)
-            if key in moveBindings.keys():
-                x = moveBindings[key][0]
-                y = moveBindings[key][1]
-                z = moveBindings[key][2]
-                th = moveBindings[key][3]
-            elif key in speedBindings.keys():
-                speed = speed * speedBindings[key][0]
-                turn = turn * speedBindings[key][1]
-
-                print(vels(speed, turn))
-                if (status == 14):
-                    print(msg)
-                status = (status + 1) % 15
-            else:
-                x = 0.0
-                y = 0.0
-                z = 0.0
-                th = 0.0
-                if (key == '\x03'):
-                    break
-
-            if stamped:
-                twist_msg.header.stamp = node.get_clock().now().to_msg()
-
-            twist.linear.x = x * speed
-            twist.linear.y = y * speed
-            twist.linear.z = z * speed
-            twist.angular.x = 0.0
-            twist.angular.y = 0.0
-            twist.angular.z = th * turn
-            pub.publish(twist_msg)
-
-    except Exception as e:
-        print(e)
-
-    finally:
-        if stamped:
-            twist_msg.header.stamp = node.get_clock().now().to_msg()
-
+    def publish_twist(self):
+        # Create new Twist message
+        if self.stamped:
+            twist = self.twist_msg.twist
+            self.twist_msg.header.stamp = self.get_clock().now().to_msg()
+            self.twist_msg.header.frame_id = self.frame_id
+        else:
+            twist = self.twist_msg
+        
+        # Set values
+        twist.linear.x = self.x * self.speed
+        twist.linear.y = self.y * self.speed
+        twist.linear.z = self.z * self.speed
+        twist.angular.x = 0.0
+        twist.angular.y = 0.0
+        twist.angular.z = self.th * self.turn
+        
+        # Publish
+        self.publisher.publish(self.twist_msg)
+    
+    def stop(self):
+        # Stop the robot
+        if self.stamped:
+            twist = self.twist_msg.twist
+            self.twist_msg.header.stamp = self.get_clock().now().to_msg()
+        else:
+            twist = self.twist_msg
+            
         twist.linear.x = 0.0
         twist.linear.y = 0.0
         twist.linear.z = 0.0
         twist.angular.x = 0.0
         twist.angular.y = 0.0
         twist.angular.z = 0.0
-        pub.publish(twist_msg)
-        rclpy.shutdown()
-        spinner.join()
+        
+        self.publisher.publish(self.twist_msg)
+        
+        # Restore terminal settings
+        self.restore_terminal_settings()
 
-        restoreTerminalSettings(settings)
+
+def main(args=None):
+    rclpy.init(args=args)
+    
+    teleop_node = TeleopTwistKeyboard()
+    
+    # Start key thread
+    teleop_node.key_thread.start()
+    
+    try:
+        # Run node
+        rclpy.spin(teleop_node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Clean shutdown
+        teleop_node.running = False
+        teleop_node.stop()
+        teleop_node.destroy_node()
+        rclpy.shutdown()
+        
+        # Wait for key thread to finish
+        if teleop_node.key_thread.is_alive():
+            teleop_node.key_thread.join()
 
 
 if __name__ == '__main__':
